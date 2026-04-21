@@ -1,0 +1,37 @@
+name: Download and Commit File
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'URL of the file to download'
+        required: true
+        type: string
+        default: 'https://example.com/your-file.zip'
+      target_path:
+        description: 'Target path to save the file (e.g., bin/1.zip)'
+        required: true
+        type: string
+        default: 'bin/1.zip'
+
+jobs:
+  download-and-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download file
+        run: |
+          mkdir -p $(dirname "${{ github.event.inputs.target_path }}")
+          curl -L "${{ github.event.inputs.file_url }}" --output "${{ github.event.inputs.target_path }}"
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ github.event.inputs.target_path }}"
+          git commit -m "Download file from ${{ github.event.inputs.file_url }}" || echo "No changes to commit"
+          git push
