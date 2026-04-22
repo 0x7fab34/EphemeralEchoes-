@@ -1,4 +1,4 @@
-name: Download and Commit File
+name: Download and Commit
 
 on:
   workflow_dispatch:
@@ -7,12 +7,17 @@ on:
         description: 'URL of the file to download'
         required: true
         type: string
-        default: 'https://example.com/your-file.zip'
+        default: 'https://example.com/your-file.exe'
       target_path:
-        description: 'Target path to save the file (e.g., bin/1.zip)'
+        description: 'Path to save the downloaded file (temporary)'
         required: true
         type: string
-        default: 'bin/1.zip'
+        default: 'temp_download/file.exe'
+      zip_output_path:
+        description: 'Path for the resulting zip archive (e.g., bin/2.zip)'
+        required: true
+        type: string
+        default: 'bin/2.zip'
 
 jobs:
   download-and-commit:
@@ -28,10 +33,17 @@ jobs:
           mkdir -p $(dirname "${{ github.event.inputs.target_path }}")
           curl -L "${{ github.event.inputs.file_url }}" --output "${{ github.event.inputs.target_path }}"
 
+      - name: Compress file into zip
+        run: |
+          mkdir -p $(dirname "${{ github.event.inputs.zip_output_path }}")
+          zip -j "${{ github.event.inputs.zip_output_path }}" "${{ github.event.inputs.target_path }}"
+          # Optionally remove the raw downloaded file
+          rm -f "${{ github.event.inputs.target_path }}"
+
       - name: Commit and push changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ github.event.inputs.target_path }}"
-          git commit -m "Download file from ${{ github.event.inputs.file_url }}" || echo "No changes to commit"
+          git add "${{ github.event.inputs.zip_output_path }}"
+          git commit -m "Add zipped file from ${{ github.event.inputs.file_url }}" || echo "No changes to commit"
           git push
