@@ -18,7 +18,7 @@ jobs:
   process-and-commit:
     runs-on: ubuntu-latest
     permissions:
-      contents: write                # Required to push commits
+      contents: write
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
@@ -26,11 +26,9 @@ jobs:
       - name: 🧹 Prepare clean working directory
         id: prepare
         run: |
-          # Extract directory and filename components
           DIR=$(dirname "${{ github.event.inputs.output_basename }}")
           BASE=$(basename "${{ github.event.inputs.output_basename }}")
           mkdir -p "$DIR"
-          # Use a temporary subdirectory to avoid accidental commits of large files
           WORK_DIR="$DIR/.split_temp_$$"
           mkdir -p "$WORK_DIR"
           echo "work_dir=$WORK_DIR" >> $GITHUB_OUTPUT
@@ -55,10 +53,9 @@ jobs:
       - name: ✂️ Split zip into 90 MB chunks
         working-directory: ${{ steps.prepare.outputs.work_dir }}
         run: |
-          split -b 90M "${{ steps.prepare.outputs.base_name }}" "${{ steps.prepare.outputs.base_name }}.part"
-          # Remove the original large zip so it won't be accidentally committed
-          rm "${{ steps.prepare.outputs.base_name }}"
-          # Count parts for later verification
+          BASE="${{ steps.prepare.outputs.base_name }}"
+          split -b 90M "$BASE" "$BASE.part"
+          rm "$BASE"
           PART_COUNT=$(ls -1 ${BASE}.part* 2>/dev/null | wc -l)
           echo "📦 Split into $PART_COUNT part(s)"
           echo "part_count=$PART_COUNT" >> $GITHUB_ENV
@@ -67,7 +64,8 @@ jobs:
       - name: 🔐 Generate SHA256 checksum for the original zip
         working-directory: ${{ steps.prepare.outputs.work_dir }}
         run: |
-          # We removed the zip, so we must recreate it temporarily from parts to get the checksum
+          BASE="${{ steps.prepare.outputs.base_name }}"
+          # Reassemble temporarily from parts to compute checksum
           cat ${BASE}.part* > ${BASE}.reassembled
           sha256sum ${BASE}.reassembled | awk '{print $1}' > ${BASE}.sha256
           rm ${BASE}.reassembled
@@ -77,10 +75,10 @@ jobs:
         working-directory: ${{ steps.prepare.outputs.work_dir }}
         run: |
           BASE="${{ steps.prepare.outputs.base_name }}"
-          cat > reassemble.sh << 'EOF'
+          cat > "${BASE}.reassemble.sh" << 'EOF'
           #!/bin/bash
           set -euo pipefail
-          BASE=$(basename "$0" .sh)
+          BASE=$(basename "$0" .reassemble.sh)
           echo "🔧 Reassembling ${BASE} from parts..."
           cat ${BASE}.part* > ${BASE}.reassembled
           if [ -f ${BASE}.sha256 ]; then
@@ -97,18 +95,14 @@ jobs:
           mv ${BASE}.reassembled ${BASE}
           echo "🎉 Reassembly complete: ${BASE}"
           EOF
-          chmod +x reassemble.sh
-          # Rename script to match the base name (e.g., Qwen.zip.reassemble.sh)
-          mv reassemble.sh "${BASE}.reassemble.sh"
+          chmod +x "${BASE}.reassemble.sh"
           echo "✅ Reassembly script created"
 
       - name: 📂 Move final parts to target directory
         run: |
           WORK_DIR="${{ steps.prepare.outputs.work_dir }}"
           TARGET_DIR="${{ steps.prepare.outputs.target_dir }}"
-          # Move all generated files (parts, checksum, script) to the target directory
           mv "$WORK_DIR"/* "$TARGET_DIR"/
-          # Remove the temporary directory
           rmdir "$WORK_DIR" || true
 
       - name: 📋 Stage and commit changes
@@ -119,12 +113,10 @@ jobs:
           TARGET_DIR="${{ steps.prepare.outputs.target_dir }}"
           BASE="${{ steps.prepare.outputs.base_name }}"
 
-          # Stage only the new files (parts, checksum, reassembly script)
           git add "$TARGET_DIR/${BASE}.part"*
           git add "$TARGET_DIR/${BASE}.sha256"
           git add "$TARGET_DIR/${BASE}.reassemble.sh"
 
-          # If no changes, exit gracefully
           if git diff --cached --quiet; then
             echo "✅ No changes to commit"
             exit 0
