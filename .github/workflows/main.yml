@@ -1,4 +1,4 @@
-name: Download and Commit
+name: 📦 Download, Zip, Split & Commit
 
 on:
   workflow_dispatch:
@@ -7,43 +7,138 @@ on:
         description: 'URL of the file to download'
         required: true
         type: string
-        default: 'https://example.com/your-file.exe'
-      target_path:
-        description: 'Path to save the downloaded file (temporary)'
+        default: 'https://download.qwen.ai/windows/x64/Qwen-1.0.3.44-release-win-x64.exe'
+      output_basename:
+        description: 'Path and base name for the final zip (e.g., bin/Qwen.zip)'
         required: true
         type: string
-        default: 'temp_download/file.exe'
-      zip_output_path:
-        description: 'Path for the resulting zip archive (e.g., bin/2.zip)'
-        required: true
-        type: string
-        default: 'bin/2.zip'
+        default: 'bin/Qwen.zip'
 
 jobs:
-  download-and-commit:
+  process-and-commit:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write                # Required to push commits
     steps:
-      - name: Checkout repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download file
+      - name: 🧹 Prepare clean working directory
+        id: prepare
         run: |
-          mkdir -p $(dirname "${{ github.event.inputs.target_path }}")
-          curl -L "${{ github.event.inputs.file_url }}" --output "${{ github.event.inputs.target_path }}"
+          # Extract directory and filename components
+          DIR=$(dirname "${{ github.event.inputs.output_basename }}")
+          BASE=$(basename "${{ github.event.inputs.output_basename }}")
+          mkdir -p "$DIR"
+          # Use a temporary subdirectory to avoid accidental commits of large files
+          WORK_DIR="$DIR/.split_temp_$$"
+          mkdir -p "$WORK_DIR"
+          echo "work_dir=$WORK_DIR" >> $GITHUB_OUTPUT
+          echo "target_dir=$DIR" >> $GITHUB_OUTPUT
+          echo "base_name=$BASE" >> $GITHUB_OUTPUT
 
-      - name: Compress file into zip
+      - name: 🌐 Download file
         run: |
-          mkdir -p $(dirname "${{ github.event.inputs.zip_output_path }}")
-          zip -j "${{ github.event.inputs.zip_output_path }}" "${{ github.event.inputs.target_path }}"
-          # Optionally remove the raw downloaded file
-          rm -f "${{ github.event.inputs.target_path }}"
+          echo "Downloading from ${{ github.event.inputs.file_url }}"
+          curl --fail --location --show-error --retry 3 \
+               --output "${{ steps.prepare.outputs.work_dir }}/downloaded_file" \
+               "${{ github.event.inputs.file_url }}"
+          echo "✅ Download complete"
 
-      - name: Commit and push changes
+      - name: 🗜️ Compress to zip (maximum compression)
+        working-directory: ${{ steps.prepare.outputs.work_dir }}
+        run: |
+          zip -9 "${{ steps.prepare.outputs.base_name }}" downloaded_file
+          rm downloaded_file
+          echo "✅ Zip created: ${{ steps.prepare.outputs.base_name }}"
+
+      - name: ✂️ Split zip into 90 MB chunks
+        working-directory: ${{ steps.prepare.outputs.work_dir }}
+        run: |
+          split -b 90M "${{ steps.prepare.outputs.base_name }}" "${{ steps.prepare.outputs.base_name }}.part"
+          # Remove the original large zip so it won't be accidentally committed
+          rm "${{ steps.prepare.outputs.base_name }}"
+          # Count parts for later verification
+          PART_COUNT=$(ls -1 ${BASE}.part* 2>/dev/null | wc -l)
+          echo "📦 Split into $PART_COUNT part(s)"
+          echo "part_count=$PART_COUNT" >> $GITHUB_ENV
+          echo "✅ Split complete"
+
+      - name: 🔐 Generate SHA256 checksum for the original zip
+        working-directory: ${{ steps.prepare.outputs.work_dir }}
+        run: |
+          # We removed the zip, so we must recreate it temporarily from parts to get the checksum
+          cat ${BASE}.part* > ${BASE}.reassembled
+          sha256sum ${BASE}.reassembled | awk '{print $1}' > ${BASE}.sha256
+          rm ${BASE}.reassembled
+          echo "✅ Checksum saved"
+
+      - name: 📝 Create reassembly script (with integrity check)
+        working-directory: ${{ steps.prepare.outputs.work_dir }}
+        run: |
+          BASE="${{ steps.prepare.outputs.base_name }}"
+          cat > reassemble.sh << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          BASE=$(basename "$0" .sh)
+          echo "🔧 Reassembling ${BASE} from parts..."
+          cat ${BASE}.part* > ${BASE}.reassembled
+          if [ -f ${BASE}.sha256 ]; then
+              echo "🔍 Verifying checksum..."
+              EXPECTED=$(cat ${BASE}.sha256)
+              ACTUAL=$(sha256sum ${BASE}.reassembled | awk '{print $1}')
+              if [ "$EXPECTED" != "$ACTUAL" ]; then
+                  echo "❌ Checksum mismatch! File may be corrupted."
+                  rm ${BASE}.reassembled
+                  exit 1
+              fi
+              echo "✅ Checksum OK"
+          fi
+          mv ${BASE}.reassembled ${BASE}
+          echo "🎉 Reassembly complete: ${BASE}"
+          EOF
+          chmod +x reassemble.sh
+          # Rename script to match the base name (e.g., Qwen.zip.reassemble.sh)
+          mv reassemble.sh "${BASE}.reassemble.sh"
+          echo "✅ Reassembly script created"
+
+      - name: 📂 Move final parts to target directory
+        run: |
+          WORK_DIR="${{ steps.prepare.outputs.work_dir }}"
+          TARGET_DIR="${{ steps.prepare.outputs.target_dir }}"
+          # Move all generated files (parts, checksum, script) to the target directory
+          mv "$WORK_DIR"/* "$TARGET_DIR"/
+          # Remove the temporary directory
+          rmdir "$WORK_DIR" || true
+
+      - name: 📋 Stage and commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ github.event.inputs.zip_output_path }}"
-          git commit -m "Add zipped file from ${{ github.event.inputs.file_url }}" || echo "No changes to commit"
-          git push
+
+          TARGET_DIR="${{ steps.prepare.outputs.target_dir }}"
+          BASE="${{ steps.prepare.outputs.base_name }}"
+
+          # Stage only the new files (parts, checksum, reassembly script)
+          git add "$TARGET_DIR/${BASE}.part"*
+          git add "$TARGET_DIR/${BASE}.sha256"
+          git add "$TARGET_DIR/${BASE}.reassemble.sh"
+
+          # If no changes, exit gracefully
+          if git diff --cached --quiet; then
+            echo "✅ No changes to commit"
+            exit 0
+          fi
+
+          COMMIT_MSG="chore: add split archive for ${BASE}
+
+          Source: ${{ github.event.inputs.file_url }}
+          Split into ${PART_COUNT:-multiple} part(s) of ≤90 MB"
+
+          git commit -m "$COMMIT_MSG"
+          echo "✅ Committed successfully"
+
+      - name: 🚀 Push to remote
+        run: |
+          git push origin HEAD:${{ github.ref_name }}
+          echo "✅ Push complete"
